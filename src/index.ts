@@ -185,6 +185,9 @@ app.post('/auth/identifier', async (c) => {
     where role = 'member' and status = 'active' and member_number is not null
   `
   let matches = rows.filter((row) => fold(row.member_number) === folded || (row.site_code !== null && fold(row.site_code) === folded))
+  if (matches.length === 0 && /\d/.test(folded)) {
+    matches = rows.filter((row) => fold(row.member_number).replace(/[a-z]+$/, '') === folded)
+  }
   if (matches.length === 0 && /^\d{5,}$/.test(query)) {
     matches = rows.filter((row) => row.member_number.replace(/\D/g, '') === query)
   }
