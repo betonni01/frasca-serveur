@@ -1,0 +1,31 @@
+name: Mise a jour du site
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reveiller le serveur et synchroniser
+        env:
+          SYNC_SECRET: ${{ secrets.SYNC_SECRET }}
+        run: |
+          if [ -z "$SYNC_SECRET" ]; then
+            echo "Secret manquant"
+            exit 1
+          fi
+          for attempt in 1 2 3 4; do
+            code=$(curl -sS -o /tmp/frasca-sync.json -w '%{http_code}' --max-time 180 \
+              -X POST https://frasca-api.onrender.com/internal/sync \
+              -H "x-sync-secret: $SYNC_SECRET")
+            if [ "$code" = "200" ]; then
+              node -e "const r=require('/tmp/frasca-sync.json'); console.log(JSON.stringify({members:r.members,news:r.news,images:r.images,errors:r.errors}))"
+              exit 0
+            fi
+            echo "tentative ${attempt} : ${code}"
+            sleep 25
+          done
+          exit 1

@@ -7,6 +7,7 @@ import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { z } from 'zod'
 import { migrate, sql } from './db.js'
+import { syncIfStale, syncSite } from './sync.js'
 import { closeLive, isLocked, issueTicket, joinLive, takeTicket, type LiveSession } from './live.js'
 
 type Profile = {
@@ -99,6 +100,44 @@ app.get('/', (c) =>
 )
 
 app.get('/health', (c) => c.json({ ok: true }))
+
+app.get('/site/feed', async (c) => {
+  const rows = await sql<{
+    kind: 'news' | 'image'
+    title: string
+    body: string | null
+    imageUrl: string | null
+    sourceUrl: string | null
+    publishedLabel: string | null
+    updatedAt: string
+  }[]>`
+    select kind, title, body, image_url as "imageUrl", source_url as "sourceUrl",
+      published_label as "publishedLabel", updated_at as "updatedAt"
+    from site_posts
+    order by kind, position
+  `
+  const updatedAt = rows.reduce<string | null>((latest, row) => {
+    if (!latest || row.updatedAt > latest) return row.updatedAt
+    return latest
+  }, null)
+  return c.json({
+    updatedAt,
+    news: rows.filter((row) => row.kind === 'news').map(({ kind: _kind, imageUrl: _imageUrl, ...row }) => row),
+    images: rows.filter((row) => row.kind === 'image').map((row) => ({
+      title: row.title,
+      url: row.imageUrl,
+    })),
+  })
+})
+
+app.post('/internal/sync', async (c) => {
+  const expected = process.env.SYNC_SECRET
+  const given = c.req.header('x-sync-secret')
+  if (!expected || !given || given.length !== expected.length) return c.json({ error: 'Non autorisé.' }, 401)
+  const valid = timingSafeEqual(Buffer.from(given), Buffer.from(expected))
+  if (!valid) return c.json({ error: 'Non autorisé.' }, 401)
+  return c.json(await syncSite())
+})
 
 app.get('/delegations', async (c) => {
   const rows = await sql`
@@ -885,3 +924,7 @@ const server = serve({ fetch: app.fetch, port, hostname: '0.0.0.0' }, (info) => 
   console.log(`FRASCA API http://localhost:${info.port}`)
 })
 injectWebSocket(server)
+void syncIfStale().catch((error: unknown) => {
+  const message = error instanceof Error ? error.message : 'synchronisation impossible'
+  console.error(`Synchronisation du site : ${message}`)
+})

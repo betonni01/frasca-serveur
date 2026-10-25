@@ -107,6 +107,26 @@ create table if not exists notifications (
 create index if not exists notifications_user_idx
   on notifications (user_id, created_at desc);
 
+create table if not exists site_posts (
+  id uuid primary key default gen_random_uuid(),
+  kind text not null check (kind in ('news', 'image')),
+  external_key text not null,
+  title text not null,
+  body text,
+  image_url text,
+  source_url text,
+  published_label text,
+  position integer not null default 0,
+  updated_at timestamptz not null default now(),
+  unique (kind, external_key)
+);
+
+create table if not exists sync_state (
+  id text primary key,
+  last_success timestamptz,
+  last_error text
+);
+
 create table if not exists mass_intentions (
   id uuid primary key default gen_random_uuid(),
   full_name text not null,
