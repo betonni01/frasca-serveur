@@ -156,11 +156,11 @@ app.post('/auth/login', async (c) => {
   if (!parsed.success) return c.json({ error: fail(parsed.error) }, 400)
 
   const email = parsed.data.email.toLowerCase()
-  const rows = await sql<{ id: string; password_hash: string }[]>`
-    select id, password_hash from users where email = ${email}
+  const rows = await sql<{ id: string; password_hash: string; password_chosen: boolean }[]>`
+    select id, password_hash, password_chosen from users where email = ${email}
   `
   const user = rows[0]
-  if (!user || !(await bcrypt.compare(parsed.data.password, user.password_hash))) {
+  if (!user || !user.password_chosen || !(await bcrypt.compare(parsed.data.password, user.password_hash))) {
     return c.json({ error: 'E-mail ou mot de passe incorrect.' }, 401)
   }
   const profile = await profileById(user.id)
@@ -171,16 +171,12 @@ function fold(value: string) {
   return value.toLowerCase().normalize('NFD').replace(/\p{M}/gu, '').replace(/[^a-z0-9]/g, '')
 }
 
-app.post('/auth/identifier', async (c) => {
-  const parsed = z.object({
-    identifier: z.string().trim().min(2, 'Indiquez votre identifiant.'),
-  }).safeParse(await c.req.json().catch(() => null))
-  if (!parsed.success) return c.json({ error: fail(parsed.error) }, 400)
+type MemberAuth = { id: string; password_hash: string; password_chosen: boolean }
 
-  const query = parsed.data.identifier
+async function matchMember(query: string) {
   const folded = fold(query)
-  const rows = await sql<{ id: string; member_number: string; site_code: string | null; full_name: string }[]>`
-    select id, member_number, site_code, full_name
+  const rows = await sql<Array<MemberAuth & { member_number: string; site_code: string | null; full_name: string }>>`
+    select id, member_number, site_code, full_name, password_hash, password_chosen
     from users
     where role = 'member' and status = 'active' and member_number is not null
   `
@@ -203,14 +199,60 @@ app.post('/auth/identifier', async (c) => {
       })
     }
   }
-  if (matches.length > 1) {
-    return c.json({ error: 'Plusieurs membres correspondent. Indiquez l’identifiant complet.' }, 409)
+  if (matches.length > 1) return { error: 'Plusieurs membres correspondent. Indiquez l’identifiant complet.', status: 409 as const }
+  if (matches.length === 0) return { error: 'Identifiant non reconnu.', status: 401 as const }
+  return { member: matches[0] }
+}
+
+app.post('/auth/identifier/start', async (c) => {
+  const parsed = z.object({
+    identifier: z.string().trim().min(2, 'Indiquez votre identifiant.'),
+  }).safeParse(await c.req.json().catch(() => null))
+  if (!parsed.success) return c.json({ error: fail(parsed.error) }, 400)
+  const found = await matchMember(parsed.data.identifier)
+  if ('error' in found) return c.json({ error: found.error }, found.status)
+  return c.json({ needsPassword: !found.member.password_chosen })
+})
+
+app.post('/auth/identifier/password', async (c) => {
+  const parsed = z.object({
+    identifier: z.string().trim().min(2, 'Indiquez votre identifiant.'),
+    password: z.string().min(8, 'Le mot de passe doit contenir au moins 8 caractères.'),
+  }).safeParse(await c.req.json().catch(() => null))
+  if (!parsed.success) return c.json({ error: fail(parsed.error) }, 400)
+  const found = await matchMember(parsed.data.identifier)
+  if ('error' in found) return c.json({ error: found.error }, found.status)
+  const passwordHash = await bcrypt.hash(parsed.data.password, 10)
+  const saved = await sql<{ id: string }[]>`
+    update users
+    set password_hash = ${passwordHash}, password_chosen = true
+    where id = ${found.member.id} and password_chosen = false
+    returning id
+  `
+  if (saved.length === 0) {
+    return c.json({ error: 'Un mot de passe existe déjà. Connectez-vous avec ce mot de passe.' }, 409)
   }
-  if (matches.length === 0) {
-    return c.json({ error: 'Identifiant non reconnu.' }, 401)
+  const profile = await profileById(saved[0].id)
+  return c.json({ token: signToken(saved[0].id), profile })
+})
+
+app.post('/auth/identifier', async (c) => {
+  const parsed = z.object({
+    identifier: z.string().trim().min(2, 'Indiquez votre identifiant.'),
+    password: z.string().optional(),
+  }).safeParse(await c.req.json().catch(() => null))
+  if (!parsed.success) return c.json({ error: fail(parsed.error) }, 400)
+  const found = await matchMember(parsed.data.identifier)
+  if ('error' in found) return c.json({ error: found.error }, found.status)
+  const password = parsed.data.password ?? ''
+  if (!found.member.password_chosen) {
+    return c.json({ error: 'Choisissez d’abord un mot de passe pour cet identifiant.' }, 409)
   }
-  const profile = await profileById(matches[0].id)
-  return c.json({ token: signToken(matches[0].id), profile })
+  if (password.length === 0 || !(await bcrypt.compare(password, found.member.password_hash))) {
+    return c.json({ error: password.length === 0 ? 'Indiquez votre mot de passe.' : 'Identifiant ou mot de passe incorrect.' }, 401)
+  }
+  const profile = await profileById(found.member.id)
+  return c.json({ token: signToken(found.member.id), profile })
 })
 
 app.get('/me', async (c) => {
@@ -256,11 +298,11 @@ app.post('/auth/candidature', async (c) => {
       insert into users (
         email, password_hash, role, status, full_name, phone,
         birth_date, birth_place, address, profession,
-        diocese_id, parish_id, oath_place, oath_on
+        diocese_id, parish_id, oath_place, oath_on, password_chosen
       ) values (
         ${email}, ${passwordHash}, 'candidate', 'pending', ${body.fullName}, ${body.phone},
         ${body.birthDate}, ${body.birthPlace}, ${body.address}, ${body.profession},
-        ${body.dioceseId}, ${body.parishId}, ${body.oathPlace}, ${body.oathOn}
+        ${body.dioceseId}, ${body.parishId}, ${body.oathPlace}, ${body.oathOn}, true
       )
       returning id
     `

@@ -34,6 +34,10 @@ create table if not exists users (
 alter table users add column if not exists site_code text;
 alter table users add column if not exists profile_path text;
 alter table users add column if not exists country text;
+alter table users add column if not exists password_chosen boolean not null default false;
+update users set password_chosen = true
+where password_chosen = false
+  and email not like '%@membres.frasca.app';
 create unique index if not exists users_site_code_unique on users (site_code) where site_code is not null;
 
 create table if not exists service_requests (
